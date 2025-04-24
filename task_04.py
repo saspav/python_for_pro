@@ -107,7 +107,7 @@ df['temp'] = df['temp'].replace(ptn_data, '', regex=True).str.strip()
 df['data'] = df['data'].map(format_date)
 
 # Шаблон для договора: 3 и более цифр, 1-3 разделителя, 1-2 цифры, после которых нет цифр
-ptn_dog = r'(\d{3,}[ \_/-]{1,3}\d{1,2})(?!\d)'
+ptn_dog = r'(\d{3,}[ \\_/-]{1,3}\d{1,2})(?!\d)'
 df['dog'] = df['temp'].str.extract(ptn_dog).fillna('')
 # Добавим номер договора, если он пуст
 df['dog'] = df.apply(

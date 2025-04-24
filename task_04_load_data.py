@@ -29,7 +29,7 @@ CREATE TABLE payments (
 """
 
 # Данные для med_an_name
-insert_payments = """
+insert_payments = r"""
 INSERT INTO payments (dt,amt,reason,reason_correct) VALUES
 	 ('2013-01-03',70286.00,'83666\22 от 31.10.2010','83666/22 от 31.10.2010'),
 	 ('2013-02-04',22835.00,'  17281/26 от 11.05.2014','17281/26 от 11.05.2014'),
