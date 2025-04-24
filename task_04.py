@@ -67,26 +67,7 @@ connection = psycopg2.connect(
 # Курсор для выполнения операций с базой данных
 cursor = connection.cursor()
 
-sql_payments = r"""
-SELECT 
-    dt,
-    amt,
-    regexp_replace(
-        regexp_replace(
-            regexp_replace(
-                regexp_replace(
-                    reason,
-                    E'\22', '/22'  -- \22 → ASCII 0x12 (SYN)
-                ),
-                E'\74', '/74'      -- \74 → ASCII 0x3C ('<')
-            ),
-            E'\2', '/2'           -- \2 → ASCII 0x02 (STX)
-        ),
-        '\\9', '/9'              
-    ) AS reason,
-    reason_correct
-FROM payments;
-"""
+sql_payments = "SELECT *FROM payments;"
 
 df = get_sql(cursor, sql_payments)
 
