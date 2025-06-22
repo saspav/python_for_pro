@@ -54,7 +54,7 @@ def objective(trial):
 np.random.seed(SEED)
 random.seed(SEED)
 
-df = pd.read_csv(r'G:\python-txt\_курс\train_сalories.csv')
+df = pd.read_csv('train_сalories.csv')
 # Колонка "id" не несет смысла - это индекс
 df.set_index("id", inplace=True)
 
