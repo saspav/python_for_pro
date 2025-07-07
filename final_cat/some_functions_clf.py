@@ -158,16 +158,17 @@ def find_best_model(metrics_df):
     print('\nЛучшая модель: {} на {} метриках из {}'.format(*result, len(models)))
 
 
-def plot_catboost_feature_importance(model, feature_names, name_model='CatBoost', top_n=20):
+def plot_feature_importance(model, feature_names, name_model='CatBoost', top_n=20):
     """
-    Визуализация важности признаков CatBoost-модели.
-
-    :param model: Обученная CatBoost модель (CatBoostClassifier или Regressor)
+    Визуализация важности признаков модели.
+    :param model: Обученная модель
     :param feature_names: Список признаков (в том же порядке, что использовались для обучения)
+    :param name_model: Имя модели для заголовка
     :param top_n: Сколько самых важных признаков отобразить
     """
-    # Получаем важности
-    importances = model.get_feature_importance()
+    # Получаем важности признаков
+    # importances = model.get_feature_importance()
+    importances = model.feature_importances_
 
     # Создаём DataFrame
     feat_imp_df = pd.DataFrame({
@@ -275,16 +276,18 @@ def set_types(df, num_cols, cat_cols):
 
 
 class DataTransform:
-    def __init__(self, numeric_columns=None, category_columns=None,
+    def __init__(self, numeric_columns=None, category_columns=None, set_category=False,
                  features2drop=None, preprocessor=None, **kwargs):
         """
         Преобразование данных
         :param numeric_columns: цифровые колонки
         :param category_columns: категориальные колонки
+        :param set_category: установить категориальные колонки как "category"
         :param features2drop: колонки, которые нужно удалить
         :param preprocessor: препроцессор для заполнения пропусков
         :param kwargs: параметры препроцессора
         """
+        self.set_category = set_category
         self.category_columns = [] if category_columns is None else category_columns
         self.numeric_columns = [] if numeric_columns is None else numeric_columns
         self.features2drop = [] if features2drop is None else features2drop
@@ -305,25 +308,30 @@ class DataTransform:
         # Создание реверсного словаря
         self.reverse_mapping = {v: k for k, v in self.mapping_target.items()}
         # Словарь кодирования категориальных признаков
-        self.mapping_yes_no = {'Yes': 1, 'No': 0}
+        self.mapping_yes_no = {'Yes': 1, 'No': 0, 'nan': 2}
 
-    def preprocess_data(self, df):
+    def preprocess_data(self, df, fill_nan_cat=False):
         """
         Предобработка данных
         :param sample: датафрейм
+        :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
         :return: предобработанный датафрейм
         """
         for col in self.category_columns:
+            if fill_nan_cat:
+                # Заполним пропуски категориальных переменных значением 'nan'
+                df[col] = df[col].fillna('nan')
             df[col] = df[col].map(self.mapping_yes_no)
         if self.target in df.columns:
             # Закодируем целевую переменную
             df[self.target] = df[self.target].map(self.mapping_target).astype(int)
         return df
 
-    def fit(self, df):
+    def fit(self, df, fill_nan_cat=False):
         """
         Формирование фич
         :param df: исходный ФД
+        :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
         :return: ДФ с агрегациями
         """
         # Колонки, которые нужно удалить
@@ -352,16 +360,17 @@ class DataTransform:
                 self.columns_with_missing.append(f"{col}_nan")
 
         # Предобработка данных
-        df = self.preprocess_data(df.copy())
+        df = self.preprocess_data(df.copy(), fill_nan_cat=fill_nan_cat)
 
         # Создаем объект Imputer
         self.p_imputer = self.preprocessor(**self.prep_kwargs)
         self.p_imputer.fit(df[self.model_columns])
 
-    def transform(self, df):
+    def transform(self, df, fill_nan_cat=False):
         """
         Формирование остальных фич
         :param df: ДФ
+        :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
         :return: ДФ с фичами
         """
         df = df.copy()
@@ -370,10 +379,15 @@ class DataTransform:
             df[col_nan] = df[col].isnull().astype(int)
 
         # Предобработка данных
-        df = self.preprocess_data(df)
+        df = self.preprocess_data(df, fill_nan_cat=fill_nan_cat)
 
         # Заполнение пропусков
         df[self.model_columns] = self.p_imputer.transform(df[self.model_columns]).astype(int)
+
+        if self.set_category:
+            # Вернем категориальные признаки
+            for col in self.category_columns:
+                df[col] = df[col].astype('category')
 
         if not self.all_features:
             self.all_features = self.model_columns + self.columns_with_missing
@@ -385,14 +399,15 @@ class DataTransform:
         # Оставим только колонки для обучения модели в нужном нам порядке
         return df[model_columns]
 
-    def fit_transform(self, df):
+    def fit_transform(self, df, fill_nan_cat=False):
         """
         Fit + transform data
         :param df: исходный ФД
+        :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
         :return: ДФ с новыми признаками
         """
-        self.fit(df)
-        df = self.transform(df)
+        self.fit(df, fill_nan_cat=fill_nan_cat)
+        df = self.transform(df, fill_nan_cat=fill_nan_cat)
         return df
 
     @staticmethod
