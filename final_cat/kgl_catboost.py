@@ -128,7 +128,8 @@ cb_best_grid = {'learning_rate': 0.011960936787877805, 'depth': 5,
                 'l2_leaf_reg': 8.09698650761031, 'min_data_in_leaf': 12,
                 'colsample_bylevel': 1.0, 'grow_policy': 'SymmetricTree',
                 'bootstrap_type': 'MVS',
-                'cat_features': cat_cols, 'verbose': False}
+                'cat_features': cat_cols,
+                'verbose': False}
 
 cb2, metrics_df8, optimal_threshold = train_valid_model(CatBoostClassifier, 8, cb_best_grid,
                                                         train, valid, model_columns, target)
@@ -141,6 +142,8 @@ print(metrics_df)
 # Трансформируем признаки тестовой выборки
 test = dts.transform(test)
 
+optimal_threshold = 0.5
+
 # Вызываем функцию для формирования сабмита: передаем обученную модель
 _ = make_submit(cb2, test[model_columns], optimal_threshold, dts.reverse_mapping)
 
@@ -152,3 +155,12 @@ _ = make_submit(cb2, test[model_columns], optimal_threshold, dts.reverse_mapping
 # 2     recall   0.95000   0.93264      -1.83  0.94067  0.93161    -0.96
 # 3         f1   0.94951   0.93995      -1.01  0.94214  0.94087    -0.13
 # 4    roc_auc   0.99158   0.96907      -2.27  0.97926  0.96995    -0.95
+
+# Оптимальный порог: 0.1972
+# n_neighbors = 4
+#       Metric  TrainCat  ValidCat  DiffCat,%   Train8   Valid8  Diff8,%
+# 0   accuracy   0.97368   0.96896      -0.48  0.96957  0.96950    -0.01
+# 1  precision   0.94902   0.94737      -0.17  0.94192  0.94937     0.79
+# 2     recall   0.95000   0.93264      -1.83  0.94119  0.93264    -0.91
+# 3         f1   0.94951   0.93995      -1.01  0.94156  0.94093    -0.07
+# 4    roc_auc   0.99158   0.96907      -2.27  0.97967  0.96924    -1.06
