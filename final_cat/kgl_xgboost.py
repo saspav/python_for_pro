@@ -28,7 +28,7 @@ def objective(trial):
         "booster": trial.suggest_categorical("booster", ["gbtree", "dart"]),
         'tree_method': trial.suggest_categorical('tree_method', ['auto', 'exact', 'hist']),
         'grow_policy': trial.suggest_categorical('grow_policy', ['depthwise', 'lossguide']),
-        'objective': 'binary:logistic',  # Изменено на бинарную классификацию
+        'objective': 'binary:logistic',  # Бинарная классификация
         'eval_metric': 'auc',  # Метрика - AUC
         'seed': SEED,
         'verbosity': 0,
@@ -77,9 +77,11 @@ train, valid, test = make_train_valid()
 
 dts = DataTransform(preprocessor=KNNImputer, n_neighbors=5)
 
+fill_nan_cat = False
+
 # Применяем трансформации
-train = dts.fit_transform(train)
-valid = dts.transform(valid)
+train = dts.fit_transform(train, fill_nan_cat=fill_nan_cat)
+valid = dts.transform(valid, fill_nan_cat=fill_nan_cat)
 
 # Колонки для моделей
 model_columns = dts.all_features
@@ -134,8 +136,9 @@ metrics_df = pd.concat([metrics_df, metrics_df4.drop(columns=['Metric'])], axis=
 print(metrics_df)
 
 # Трансформируем признаки тестовой выборки
-test = dts.transform(test)
+test = dts.transform(test, fill_nan_cat=fill_nan_cat)
 
+optimal_threshold = 0.5
 # Вызываем функцию для формирования сабмита: передаем обученную модель
 _ = make_submit(xb2, test[model_columns], optimal_threshold, dts.reverse_mapping)
 
