@@ -294,10 +294,13 @@ class DataTransform:
         self.preprocessor = KNNImputer if preprocessor is None else preprocessor
         self.prep_kwargs = kwargs if kwargs else dict(n_neighbors=7)
         self.p_imputer = None
+        self.cat_cols = self.category_columns.copy()
         # Целевая переменная
         self.target = 'Personality'
         # Колонки: числовые + категориальные
         self.model_columns = []
+        # Колонки для заполнения пропусков
+        self.imputer_cols = []
         # Колонки, используемые в модели с пропусками
         self.columns_with_nans = []
         self.columns_with_missing = []
@@ -317,40 +320,67 @@ class DataTransform:
         :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
         :return: предобработанный датафрейм
         """
-        for col in self.category_columns:
+        for col in self.cat_cols:
             if fill_nan_cat:
                 # Заполним пропуски категориальных переменных значением 'nan'
                 df[col] = df[col].fillna('nan')
             df[col] = df[col].map(self.mapping_yes_no)
+        # Закодируем целевую переменную
         if self.target in df.columns:
-            # Закодируем целевую переменную
             df[self.target] = df[self.target].map(self.mapping_target).astype(int)
         return df
 
-    def fit(self, df, fill_nan_cat=False):
+    def make_attribute_columns(self, df):
         """
-        Формирование фич
-        :param df: исходный ФД
-        :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
-        :return: ДФ с агрегациями
+        Процедура формирования списков категориальных и цифровых колонок
+        :param df: ДФ
+        :return: списки категориальных и цифровых колонок
         """
         # Колонки, которые нужно удалить
         features2drop = self.features2drop + [self.target]
 
+        # Выбираем категориальные колонки (включая строки и категории)
+        category_columns = (df.drop(columns=features2drop, errors='ignore')
+                            .select_dtypes(include=['object', 'category'])
+                            .columns.tolist())
+
+        # Выбираем числовые признаки
+        numeric_columns = (df.drop(columns=features2drop, errors='ignore')
+                           .select_dtypes(include=['number'])
+                           .columns.tolist())
+
+        # Колонки, используемые в модели
+        self.model_columns = numeric_columns + category_columns
+        return category_columns, numeric_columns
+
+    def set_category_cols(self, df):
+        if self.set_category:
+            # Вернем категориальные признаки
+            for col in self.cat_cols:
+                df[col] = df[col].astype('category')
+        return df
+
+    def fit(self, df, fill_nan_cat=False, add_new_features=False):
+        """
+        Формирование фич
+        :param df: исходный ФД
+        :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
+        :param add_new_features: добавить новые признаки
+        :return: ДФ с агрегациями
+        """
+        df = df.copy()
+
+        # Процедура формирования списков категориальных и цифровых колонок
+        category_columns, numeric_columns = self.make_attribute_columns(df)
+
         # если нет категориальных колонок --> заполним их
         if not self.category_columns:
-            # Выбираем категориальные колонки (включая строки и категории)
-            self.category_columns = df.drop(columns=features2drop).select_dtypes(
-                include=['object', 'category']).columns.tolist()
+            self.category_columns = category_columns.copy()
+            self.cat_cols = category_columns.copy()
 
         # если нет цифровых колонок --> заполним их
         if not self.numeric_columns:
-            # Выбираем числовые признаки
-            self.numeric_columns = df.drop(columns=features2drop).select_dtypes(
-                include=['number']).columns.tolist()
-
-        # Колонки, используемые в модели
-        self.model_columns = self.numeric_columns + self.category_columns
+            self.numeric_columns = numeric_columns.copy()
 
         self.columns_with_nans = []
         self.columns_with_missing = []
@@ -363,14 +393,34 @@ class DataTransform:
         df = self.preprocess_data(df.copy(), fill_nan_cat=fill_nan_cat)
 
         # Создаем объект Imputer
+        self.imputer_cols = self.model_columns.copy()
         self.p_imputer = self.preprocessor(**self.prep_kwargs)
-        self.p_imputer.fit(df[self.model_columns])
+        self.p_imputer.fit(df[self.imputer_cols])
 
-    def transform(self, df, fill_nan_cat=False):
+        if add_new_features:
+            # Заполнение пропусков
+            df[self.model_columns] = self.p_imputer.transform(
+                df[self.model_columns]).astype(int)
+
+            # Вернем категориальные признаки
+            df = self.set_category_cols(df)
+
+            # Добавление новых признаков
+            df = self.add_new_features(df)
+
+            # Добавление агрегатов по признакам
+            pass
+
+            # Процедура формирования списков категориальных и цифровых колонок
+            self.make_attribute_columns(df)
+            self.category_columns, self.numeric_columns = self.make_attribute_columns(df)
+
+    def transform(self, df, fill_nan_cat=False, add_new_features=False):
         """
         Формирование остальных фич
         :param df: ДФ
         :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
+        :param add_new_features: добавить новые признаки
         :return: ДФ с фичами
         """
         df = df.copy()
@@ -382,15 +432,21 @@ class DataTransform:
         df = self.preprocess_data(df, fill_nan_cat=fill_nan_cat)
 
         # Заполнение пропусков
-        df[self.model_columns] = self.p_imputer.transform(df[self.model_columns]).astype(int)
+        df[self.imputer_cols] = self.p_imputer.transform(df[self.imputer_cols]).astype(int)
 
-        if self.set_category:
-            # Вернем категориальные признаки
-            for col in self.category_columns:
-                df[col] = df[col].astype('category')
+        # Вернем категориальные признаки
+        df = self.set_category_cols(df)
+
+        all_features_add = []
+        if add_new_features:
+            # Добавление новых признаков
+            df = self.add_new_features(df)
+            all_features_add = df.drop(columns=self.target, errors='ignore').columns
 
         if not self.all_features:
             self.all_features = self.model_columns + self.columns_with_missing
+            self.all_features.extend([col for col in all_features_add
+                                      if col not in self.all_features])
 
         model_columns = self.all_features.copy()
         if self.target in df.columns:
@@ -399,15 +455,16 @@ class DataTransform:
         # Оставим только колонки для обучения модели в нужном нам порядке
         return df[model_columns]
 
-    def fit_transform(self, df, fill_nan_cat=False):
+    def fit_transform(self, df, fill_nan_cat=False, add_new_features=False):
         """
         Fit + transform data
         :param df: исходный ФД
         :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
+        :param add_new_features: добавить новые признаки
         :return: ДФ с новыми признаками
         """
-        self.fit(df, fill_nan_cat=fill_nan_cat)
-        df = self.transform(df, fill_nan_cat=fill_nan_cat)
+        self.fit(df, fill_nan_cat=fill_nan_cat, add_new_features=add_new_features)
+        df = self.transform(df, fill_nan_cat=fill_nan_cat, add_new_features=add_new_features)
         return df
 
     @staticmethod
@@ -421,8 +478,80 @@ class DataTransform:
             df.drop(columns=col_to_drop, inplace=True)
         return df
 
+    @staticmethod
+    def add_new_features(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Добавление новых признаков
+        :param df: исходный ДФ
+        :return: ДФ с новыми признаками
+        """
+        df = df.copy()
 
-def make_train_valid(test_size=0.2):
+        # 1. 📊 Биннинги признаков
+        df['alone_bin'] = pd.cut(
+            df['Time_spent_Alone'],
+            bins=[-1, 2, 4, 11],
+            labels=['low', 'medium', 'high']
+        )  # Мало / средне / много времени в одиночестве
+
+        df['friends_bin'] = pd.cut(
+            df['Friends_circle_size'],
+            bins=[-1, 5, 10, 15],
+            labels=['few', 'medium', 'many']
+        )  # Размер круга общения
+
+        df['outside_bin'] = pd.cut(
+            df['Going_outside'],
+            bins=[-1, 3, 5, 7],
+            labels=['homebody', 'balanced', 'outgoing']
+        )  # Частота выхода из дома
+
+        df['posts_bin'] = pd.cut(
+            df['Post_frequency'],
+            bins=[-1, 3, 6, 10],
+            labels=['inactive', 'moderate', 'active']
+        )  # Частота постинга
+
+        df['events_bin'] = pd.cut(
+            df['Social_event_attendance'],
+            bins=[-1, 3, 6, 10],
+            labels=['rare', 'moderate', 'frequent']
+        )  # Частота участия в мероприятиях
+
+        # 2. 🧠 Инженерные признаки
+
+        # Социальная изоляция
+        df['loneliness_index'] = df['Time_spent_Alone'] / (df['Friends_circle_size'] + 1)
+
+        # Общая активность вне дома
+        df['social_activity'] = df['Social_event_attendance'] + df['Going_outside']
+
+        # Индекс интроверсии (если усталость от общения — +3 балла)
+        df['introvert_score'] = (df['Time_spent_Alone'] +
+                                 df['Drained_after_socializing'].astype(int) * 3)
+
+        # Частота постов на одного друга
+        df['post_per_friend'] = df['Post_frequency'] / (df['Friends_circle_size'] + 1)
+
+        # Баланс оффлайн/онлайн активности
+        df['event_vs_post_ratio'] = df['Social_event_attendance'] / (df['Post_frequency'] + 1)
+
+        # Насколько человек активен и не устаёт от общества
+        df['active_life_index'] = df['Going_outside'] * (
+                1 - df['Drained_after_socializing'].astype(int))
+
+        # Индикатор социальной тревожности (оба признака = 1)
+        df['social_anxiety'] = (df['Stage_fear'].astype(int) &
+                                df['Drained_after_socializing'].astype(int)).astype(int)
+
+        # 3. 🔍 Признак "есть ли пропуски вообще"
+        nan_cols = [col for col in df.columns if col.endswith('_nan')]
+        df['has_any_missing'] = df[nan_cols].sum(axis=1).gt(0).astype(int)
+
+        return df
+
+
+def make_train_valid(test_size=0.2, return_full_df=False):
     """
     Функция чтения данных и разделения на тренировочную и валидационную выборки
     :param test_size: размер валидационной части
@@ -443,4 +572,153 @@ def make_train_valid(test_size=0.2):
     # Будем делить со стратификацией
     train, valid = train_test_split(df, test_size=test_size, stratify=df[target],
                                     random_state=SEED)
+    if return_full_df:
+        return train, valid, test, df
+
     return train, valid, test
+
+
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # 1. 📊 Биннинги признаков
+    df['alone_bin'] = pd.cut(
+        df['Time_spent_Alone'],
+        bins=[-1, 2, 4, 11],
+        labels=['low', 'medium', 'high']
+    )  # Мало / средне / много времени в одиночестве
+
+    df['friends_bin'] = pd.cut(
+        df['Friends_circle_size'],
+        bins=[-1, 5, 10, 15],
+        labels=['few', 'medium', 'many']
+    )  # Размер круга общения
+
+    df['outside_bin'] = pd.cut(
+        df['Going_outside'],
+        bins=[-1, 3, 5, 7],
+        labels=['homebody', 'balanced', 'outgoing']
+    )  # Частота выхода из дома
+
+    df['posts_bin'] = pd.cut(
+        df['Post_frequency'],
+        bins=[-1, 3, 6, 10],
+        labels=['inactive', 'moderate', 'active']
+    )  # Частота постинга
+
+    df['events_bin'] = pd.cut(
+        df['Social_event_attendance'],
+        bins=[-1, 3, 6, 10],
+        labels=['rare', 'moderate', 'frequent']
+    )  # Частота участия в мероприятиях
+
+    # Проставим тип 'category'
+    cat_cols = [col for col in df.columns if col.endswith('_bin')]
+    for col in cat_cols:
+        df[col] = df[col].astype('category')
+
+    # 2. 🧠 Инженерные признаки
+
+    # Социальная изоляция
+    df['loneliness_index'] = df['Time_spent_Alone'] / (df['Friends_circle_size'] + 1)
+
+    # Общая активность вне дома
+    df['social_activity'] = df['Social_event_attendance'] + df['Going_outside']
+
+    # Индекс интроверсии (если усталость от общения — +3 балла)
+    df['introvert_score'] = df['Time_spent_Alone'] + df['Drained_after_socializing'] * 3
+
+    # Частота постов на одного друга
+    df['post_per_friend'] = df['Post_frequency'] / (df['Friends_circle_size'] + 1)
+
+    # Баланс оффлайн/онлайн активности
+    df['event_vs_post_ratio'] = df['Social_event_attendance'] / (df['Post_frequency'] + 1)
+
+    # Насколько человек активен и не устаёт от общества
+    df['active_life_index'] = df['Going_outside'] * (1 - df['Drained_after_socializing'])
+
+    # Индикатор социальной тревожности (оба признака = 1)
+    df['social_anxiety'] = (df['Stage_fear'] & df['Drained_after_socializing']).astype(int)
+
+    # 3. 🔍 Признак "есть ли пропуски вообще"
+    nan_cols = [col for col in df.columns if col.endswith('_nan')]
+    df['has_any_missing'] = df[nan_cols].sum(axis=1).gt(0).astype(int)
+
+    return df
+
+
+def add_group_stats_transform(df: pd.DataFrame, train_stats: dict = None) -> tuple[
+    pd.DataFrame, dict]:
+    df = df.copy()
+
+    bin_cols = ['alone_bin', 'friends_bin', 'events_bin', 'outside_bin', 'posts_bin']
+    features = ['Time_spent_Alone', 'Social_event_attendance', 'Going_outside',
+                'Friends_circle_size', 'Post_frequency']
+
+    # 1. Групповые статистики (по бинам)
+    for bin_col in bin_cols:
+        for col in features:
+            grp = df.groupby(bin_col)[col]
+            df[f'{bin_col}_{col}_mean'] = grp.transform('mean')
+            df[f'{bin_col}_{col}_std'] = grp.transform('std')
+
+    # 2. Z-оценки (глобальные — по всему train)
+
+    stats = {} if train_stats is None else train_stats  # словарь со средними/стд
+
+    for col in features:
+        if train_stats is None:
+            mean = df[col].mean()
+            std = df[col].std()
+            stats[col] = (mean, std)
+        else:
+            mean, std = stats[col]
+
+        df[f'{col}_zscore'] = (df[col] - mean) / std
+
+    return df, stats
+
+
+def compute_group_stats(df_train: pd.DataFrame) -> dict:
+    """Вычисляет средние и std значения целевых признаков по каждой бин-группе
+    Возвращает словарь DataFrame'ов с агрегатами по группам:
+    """
+    stats = {}
+    target_cols = ['Post_frequency', 'Time_spent_Alone', 'Going_outside',
+                   'Social_event_attendance']
+
+    bin_cols = ['alone_bin', 'friends_bin', 'events_bin', 'outside_bin', 'posts_bin']
+
+    for bin_col in bin_cols:
+        group_stat = df_train.groupby(bin_col)[target_cols].agg(['mean', 'std']).reset_index()
+        # Flatten MultiIndex
+        group_stat.columns = [f"{bin_col}_{col[0]}_{col[1]}" if col[1] else col[0] for col in
+                              group_stat.columns]
+        stats[bin_col] = group_stat
+
+    return stats
+
+
+def apply_group_stats(df: pd.DataFrame, stats: dict) -> pd.DataFrame:
+    """
+    Добавляет признаки валидации/теста на основе групп из train:
+    :param df:
+    :param stats:
+    :return:
+    """
+    df = df.copy()
+    for bin_col, group_df in stats.items():
+        df = df.merge(group_df, how='left', left_on=bin_col, right_on=group_df.columns[0])
+    return df
+
+
+if __name__ == '__main__':
+    train, valid, test, df = make_train_valid(return_full_df=True)
+
+    dts = DataTransform(set_category=True, preprocessor=KNNImputer, n_neighbors=4)
+
+    # Применяем трансформации
+    train = dts.fit_transform(train, add_new_features=True)
+    valid = dts.transform(valid, add_new_features=True)
+
+    print(train.columns)
