@@ -22,15 +22,15 @@ warnings.filterwarnings("ignore")
 from some_functions_clf import (SEED, make_train_valid, DataTransform, find_depth,
                                 train_valid_model, make_submit)
 
-
 def objective(trial):
-    boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+    # boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+    boosting_type = 'gbdt'
 
     params_cv = {
         'boosting_type': boosting_type,
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.1),
         'num_leaves': trial.suggest_int('num_leaves', 10, 100),
-        'max_depth': trial.suggest_int('max_depth', 4, 8),
+        'max_depth': trial.suggest_int('max_depth', 3, 5),
         'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
         'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 1.0, log=True),
@@ -69,7 +69,6 @@ def objective(trial):
         callbacks=[LightGBMPruningCallback(trial, 'auc')],
         # verbose_eval=False
     )
-    # print(cv_result)
     # Возвращаем лучший AUC
     return np.mean(cv_result['valid auc-mean'])
 
@@ -87,7 +86,7 @@ target = 'Personality'
 
 train, valid, test = make_train_valid()
 
-dts = DataTransform(preprocessor=KNNImputer, n_neighbors=5)
+dts = DataTransform(set_category=True, preprocessor=KNNImputer, n_neighbors=5)
 
 # Применяем трансформации
 train = dts.fit_transform(train)
@@ -95,15 +94,17 @@ valid = dts.transform(valid)
 
 # Колонки для моделей
 model_columns = dts.all_features
+cat_cols = dts.category_columns
 
 # Обучение модели с параметрами по умолчанию
-params = {'force_row_wise': True, 'n_jobs': -1, 'verbosity': -1}
+params = {'categorical_feature': cat_cols, 'force_row_wise': True,
+          'n_jobs': -1, 'verbosity': -1}
 
-xb1, metrics_df3, _ = train_valid_model(LGBMClassifier, 'LGC', params,
+xb1, metrics_df5, _ = train_valid_model(LGBMClassifier, 'LGC', params,
                                         train, valid, model_columns, target)
 
-print(metrics_df3, '\n')
-metrics_df = metrics_df3
+print(metrics_df5, '\n')
+metrics_df = metrics_df5
 
 # # Подберем оптимальную глубину дерева
 # opt_depth_xb = find_depth(LGBMClassifier, params, train, valid, model_columns, target)
@@ -114,9 +115,8 @@ X_train, y_train = train[model_columns], train[target]
 X_valid, y_valid = valid[model_columns], valid[target]
 
 # Подготовка данных в DMatrix
-dtrain = Dataset(X_train, y_train)
-dvalid = Dataset(X_valid, y_valid)
-
+dtrain = Dataset(X_train, y_train, categorical_feature=cat_cols, free_raw_data=False)
+dvalid = Dataset(X_valid, y_valid, categorical_feature=cat_cols, free_raw_data=False)
 # Отключение инфо выводов
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -128,10 +128,17 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # print(f"Лучший AUC: {study.best_value:.4f}")  # Форматирование для AUC
 # print("Лучшие параметры:", study.best_params)
 
-lg_best_grid = {'boosting_type': 'goss', 'learning_rate': 0.010527356559607244,
-                'num_leaves': 54, 'max_depth': 4, 'min_child_samples': 26,
-                'colsample_bytree': 0.6498369482631124, 'reg_alpha': 0.001996825899468912,
-                'reg_lambda': 0.0029056516001497996,
+# lg_best_grid = {'boosting_type': 'goss', 'learning_rate': 0.010527356559607244,
+#                 'num_leaves': 54, 'max_depth': 4, 'min_child_samples': 26,
+#                 'colsample_bytree': 0.6498369482631124, 'reg_alpha': 0.001996825899468912,
+#                 'reg_lambda': 0.0029056516001497996,
+#                 'n_jobs': -1, 'verbosity': -1}
+
+lg_best_grid = {'learning_rate': 0.012168409321350424, 'num_leaves': 78, 'max_depth': 4,
+                'min_child_samples': 31, 'colsample_bytree': 0.7152350985965117,
+                'reg_alpha': 0.0152465652290482, 'reg_lambda': 0.0026314520377431084,
+                'subsample': 0.7475755007546926, 'bagging_fraction': 0.6356741993284825,
+                'bagging_freq': 6,
                 'n_jobs': -1, 'verbosity': -1}
 
 lg2, metrics_df6, optimal_threshold = train_valid_model(LGBMClassifier, 6, lg_best_grid,
@@ -142,6 +149,8 @@ print(metrics_df)
 
 # Трансформируем признаки тестовой выборки
 test = dts.transform(test)
+
+optimal_threshold = 0.5
 
 # Вызываем функцию для формирования сабмита: передаем обученную модель
 _ = make_submit(lg2, test[model_columns], optimal_threshold, dts.reverse_mapping)
@@ -161,3 +170,11 @@ _ = make_submit(lg2, test[model_columns], optimal_threshold, dts.reverse_mapping
 # 2     recall   0.94611   0.93368      -1.31  0.93834  0.93057    -0.83
 # 3         f1   0.94575   0.94198      -0.40  0.94029  0.93982    -0.05
 # 4    roc_auc   0.99309   0.96473      -2.86  0.97544  0.96955    -0.60
+
+# Оптимальный порог: 0.3020 (max_depth = 4 - 'gbdt')
+#       Metric  TrainLGC  ValidLGC  DiffLGC,%   Train6   Valid6  Diff6,%
+# 0   accuracy   0.97173   0.97004      -0.17  0.96903  0.96869    -0.03
+# 1  precision   0.94538   0.95042       0.53  0.94295  0.94921     0.66
+# 2     recall   0.94611   0.93368      -1.31  0.93782  0.92953    -0.88
+# 3         f1   0.94575   0.94198      -0.40  0.94038  0.93927    -0.12
+# 4    roc_auc   0.99309   0.96473      -2.86  0.97425  0.96932    -0.51
