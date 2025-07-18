@@ -4,11 +4,10 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import random
 
-from sklearn.impute import SimpleImputer, KNNImputer
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import SimpleImputer, KNNImputer, IterativeImputer
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (  # Метрики оценки качества модели
     make_scorer, roc_curve, precision_recall_curve,
     accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
@@ -100,13 +99,20 @@ def train_valid_model(model_class, model_num, model_params, df_train, df_valid,
     X_train, y_train = df_train[model_cols], df_train[target_col]
     X_valid, y_valid = df_valid[model_cols], df_valid[target_col]
 
-    model = model_class(**model_params, random_state=SEED)
-
-    model.fit(X_train, y_train)
+    if model_class.__name__ == 'GradientBoosting':
+        model = model_class(**model_params)
+        model.fit(X_train, y_train, eval_sets=[{'X': X_valid, 'y': y_valid}, ])
+    else:
+        model = model_class(**model_params, random_state=SEED)
+        model.fit(X_train, y_train)
 
     # Получение вероятностей
-    y_train_proba = model.predict_proba(X_train)[:, 1]
-    y_valid_proba = model.predict_proba(X_valid)[:, 1]
+    if hasattr(model, 'predict_proba'):
+        y_train_proba = model.predict_proba(X_train)[:, 1]
+        y_valid_proba = model.predict_proba(X_valid)[:, 1]
+    else:
+        y_train_proba = model.predict(X_train)
+        y_valid_proba = model.predict(X_valid)
 
     # Подбираем порог на валидационной выборке
     optimal_threshold = find_optimal_threshold(y_valid, y_valid_proba)
@@ -221,7 +227,7 @@ def find_depth(model_class, model_params, train, valid, model_columns, target, d
         # и минимум был хотя бы 2 шага назад
         max_valid_f1 = max(valid_f1)
         max_index = valid_f1.index(max_valid_f1)
-        if len(valid_f1) > max_index + 2 and valid_f1[-1] < max_valid_f1:
+        if len(valid_f1) > max_index + 3 and valid_f1[-1] < max_valid_f1:
             print(f"Ранняя остановка: лучший Valid F1 ({max_valid_f1:.5f}) "
                   f"был на глубине {depths[max_index]}")
             break
@@ -239,21 +245,27 @@ def find_depth(model_class, model_params, train, valid, model_columns, target, d
     return depths[max_index]
 
 
-def make_submit(model, X_test, threshold, reverse_mapping):
+def make_submit(model, X_test, threshold, reverse_mapping, postfix='', save_to_excel=False):
     """
     Подготовка файла сабмита для загрузки на Каггл
     :param model: обученная модель
     :param X_test: подготовленные тестовые данные
     :param threshold: порог для классификации
     :param reverse_mapping: реверсный словарь целевой переменной
+    :param postfix: постфикс для имени файла сабмита
+    :param save_to_excel: сохранить X_test в эксель
     :return: Имя файла сабмита
     """
     # Целевая переменная
     target = 'Personality'
     # Формируем имя файла
-    file_submit = f'submit_{model.__class__.__name__}.csv'
+    file_submit = f'submit_{model.__class__.__name__}{postfix}.csv'
     # Получаем предсказания
-    y_test_proba = model.predict_proba(X_test)[:, 1]
+    # Получение вероятностей
+    if hasattr(model, 'predict_proba'):
+        y_test_proba = model.predict_proba(X_test)[:, 1]
+    else:
+        y_test_proba = model.predict(X_test)
     # Преобразуем вероятности в классы 0 / 1
     y_test_pred = (y_test_proba >= threshold).astype(int)
     # Записываем в датафрейм
@@ -262,6 +274,8 @@ def make_submit(model, X_test, threshold, reverse_mapping):
     X_test[target] = X_test[target].map(reverse_mapping)
     # Сохраняем в файл
     X_test[target].to_csv(file_submit)
+    if save_to_excel:
+        X_test.to_excel(file_submit.replace('.csv', '.xlsx'))
     print(f'Сформирован файл сабмита: {file_submit}')
     return file_submit
 
@@ -277,16 +291,18 @@ def set_types(df, num_cols, cat_cols):
 
 class DataTransform:
     def __init__(self, numeric_columns=None, category_columns=None, set_category=False,
-                 features2drop=None, preprocessor=None, **kwargs):
+                 features2drop=None, set_num_int=True, preprocessor=None, **kwargs):
         """
         Преобразование данных
         :param numeric_columns: цифровые колонки
         :param category_columns: категориальные колонки
         :param set_category: установить категориальные колонки как "category"
         :param features2drop: колонки, которые нужно удалить
+        :param set_num_int: после заполнения пропусков установить тип INT
         :param preprocessor: препроцессор для заполнения пропусков
         :param kwargs: параметры препроцессора
         """
+        self.set_num_int = set_num_int
         self.set_category = set_category
         self.category_columns = [] if category_columns is None else category_columns
         self.numeric_columns = [] if numeric_columns is None else numeric_columns
@@ -312,6 +328,9 @@ class DataTransform:
         self.reverse_mapping = {v: k for k, v in self.mapping_target.items()}
         # Словарь кодирования категориальных признаков
         self.mapping_yes_no = {'Yes': 1, 'No': 0, 'nan': 2}
+        # Словарь группировок по целевой переменной
+        self.grp_stats = {}
+        self.grp_stats_cols = []
 
     def preprocess_data(self, df, fill_nan_cat=False):
         """
@@ -323,7 +342,7 @@ class DataTransform:
         for col in self.cat_cols:
             if fill_nan_cat:
                 # Заполним пропуски категориальных переменных значением 'nan'
-                df[col] = df[col].fillna('nan')
+                df[col] = df[col].astype(str).fillna('nan')
             df[col] = df[col].map(self.mapping_yes_no)
         # Закодируем целевую переменную
         if self.target in df.columns:
@@ -358,6 +377,17 @@ class DataTransform:
             # Вернем категориальные признаки
             for col in self.cat_cols:
                 df[col] = df[col].astype('category')
+        else:
+            for col in self.cat_cols:
+                df[col] = df[col].astype(int)
+        return df
+
+    @staticmethod
+    def apply_group_stats(df, group_stats, global_mean, feature_cols):
+        for col in feature_cols:
+            new_col = f"{col}_group_mean"
+            df[new_col] = df[col].map(group_stats[col])
+            df[new_col].fillna(global_mean, inplace=True)
         return df
 
     def fit(self, df, fill_nan_cat=False, add_new_features=False):
@@ -385,22 +415,38 @@ class DataTransform:
         self.columns_with_nans = []
         self.columns_with_missing = []
         for col in df.columns:
-            if df[col].isnull().any():
+            if df[col].isnull().any() and col != 'Pers_orig':
                 self.columns_with_nans.append(col)
                 self.columns_with_missing.append(f"{col}_nan")
 
         # Предобработка данных
         df = self.preprocess_data(df.copy(), fill_nan_cat=fill_nan_cat)
 
-        # Создаем объект Imputer
         self.imputer_cols = self.model_columns.copy()
+
+        # Формируем группировки по целевой переменной
+        self.grp_stats_cols = []
+        for col in self.imputer_cols:
+            # Удаляем пропуски и приводим к int
+            temp = df[[col, self.target]].dropna(subset=[col]).copy()
+            temp[col] = temp[col].astype(int)
+            # Считаем статистики
+            self.grp_stats[col] = temp.groupby(col)[self.target].mean().to_dict()
+            self.grp_stats_cols.append(f"{col}_tar_mean")
+
+        # Создаем объект Imputer
         self.p_imputer = self.preprocessor(**self.prep_kwargs)
         self.p_imputer.fit(df[self.imputer_cols])
 
         if add_new_features:
             # Заполнение пропусков
-            df[self.model_columns] = self.p_imputer.transform(
-                df[self.model_columns]).astype(int)
+            if self.set_num_int:
+                df[self.imputer_cols] = (self.p_imputer.transform(df[self.imputer_cols])
+                                         .round()
+                                         .astype(int)
+                                         )
+            else:
+                df[self.imputer_cols] = self.p_imputer.transform(df[self.imputer_cols])
 
             # Вернем категориальные признаки
             df = self.set_category_cols(df)
@@ -412,14 +458,14 @@ class DataTransform:
             pass
 
             # Процедура формирования списков категориальных и цифровых колонок
-            self.make_attribute_columns(df)
             self.category_columns, self.numeric_columns = self.make_attribute_columns(df)
 
-    def transform(self, df, fill_nan_cat=False, add_new_features=False):
+    def transform(self, df, fill_nan_cat=False, add_grp_target=False, add_new_features=False):
         """
         Формирование остальных фич
         :param df: ДФ
         :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
+        :param add_grp_target: добавить группировки по целевой переменной
         :param add_new_features: добавить новые признаки
         :return: ДФ с фичами
         """
@@ -432,7 +478,21 @@ class DataTransform:
         df = self.preprocess_data(df, fill_nan_cat=fill_nan_cat)
 
         # Заполнение пропусков
-        df[self.imputer_cols] = self.p_imputer.transform(df[self.imputer_cols]).astype(int)
+        if self.set_num_int:
+            df[self.imputer_cols] = (self.p_imputer.transform(df[self.imputer_cols])
+                                     .round()
+                                     .astype(int)
+                                     )
+        else:
+            df[self.imputer_cols] = self.p_imputer.transform(df[self.imputer_cols])
+
+        if add_grp_target:
+            for col in self.imputer_cols:
+                new_col = f"{col}_tar_mean"
+                df[new_col] = df[col].map(self.grp_stats[col])
+                # df[new_col].fillna(df[self.target].mean(), inplace=True)
+
+            # print(df.isna().sum())
 
         # Вернем категориальные признаки
         df = self.set_category_cols(df)
@@ -447,6 +507,9 @@ class DataTransform:
             self.all_features = self.model_columns + self.columns_with_missing
             self.all_features.extend([col for col in all_features_add
                                       if col not in self.all_features])
+            if add_grp_target:
+                self.all_features.extend([col for col in self.grp_stats_cols
+                                          if col not in self.all_features])
 
         model_columns = self.all_features.copy()
         if self.target in df.columns:
@@ -455,16 +518,19 @@ class DataTransform:
         # Оставим только колонки для обучения модели в нужном нам порядке
         return df[model_columns]
 
-    def fit_transform(self, df, fill_nan_cat=False, add_new_features=False):
+    def fit_transform(self, df, fill_nan_cat=False, add_grp_target=False,
+                      add_new_features=False):
         """
         Fit + transform data
         :param df: исходный ФД
         :param fill_nan_cat: заполнять пропуски категориальных переменных значением 'nan'
+        :param add_grp_target: добавить группировки по целевой переменной
         :param add_new_features: добавить новые признаки
         :return: ДФ с новыми признаками
         """
         self.fit(df, fill_nan_cat=fill_nan_cat, add_new_features=add_new_features)
-        df = self.transform(df, fill_nan_cat=fill_nan_cat, add_new_features=add_new_features)
+        df = self.transform(df, fill_nan_cat=fill_nan_cat, add_grp_target=add_grp_target,
+                            add_new_features=add_new_features)
         return df
 
     @staticmethod
@@ -551,15 +617,40 @@ class DataTransform:
         return df
 
 
-def make_train_valid(test_size=0.2, return_full_df=False):
+def make_train_valid(test_size=0.2, return_full_df=False, add_original_df=False,
+                     round_to_int=False):
     """
     Функция чтения данных и разделения на тренировочную и валидационную выборки
     :param test_size: размер валидационной части
+    :param return_full_df: вернуть полный тренировочный ДФ
+    :param add_original_df: добавить метки оригинального ДФ
+    :param round_to_int: округлить float до int
     :return: train, valid, test
     """
     # Чтение данных
     df = pd.read_csv('train.csv')
     test = pd.read_csv('test.csv')
+
+    if add_original_df:
+        merge_cols = test.drop(columns='id').columns.to_list()
+        # Загрузим оригинальный ДФ на основе которого были сделаны train.csv и test.csv
+        df_orig = (pd.read_csv('personality_datasert.csv')
+                   .rename(columns={'Personality': 'Pers_orig'})
+                   .fillna(-99)
+                   .drop_duplicates(subset=merge_cols)
+                   )
+        if round_to_int:
+            # Округляем заполненные NaN до целого
+            for col in df_orig.select_dtypes(include=['number']):
+                df_orig[col] = df_orig[col].round()
+        # Закодируем 'Pers_orig' как целевую переменную
+        mapping_target = {'Extrovert': 0, 'Introvert': 1}
+        df_orig['Pers_orig'] = df_orig['Pers_orig'].map(mapping_target).astype(int)
+        # Добавим истинные метки в оба набора данных
+        df = df.fillna(-99).merge(df_orig, on=merge_cols, how='left').replace(-99, np.nan)
+        test = test.fillna(-99).merge(df_orig, on=merge_cols, how='left').replace(-99, np.nan)
+        df = df.merge(df_orig, on=merge_cols, how='left')
+        test = test.merge(df_orig, on=merge_cols, how='left')
 
     # Колонка "id" не несет смысла - это индекс
     df.set_index("id", inplace=True)
@@ -576,75 +667,6 @@ def make_train_valid(test_size=0.2, return_full_df=False):
         return train, valid, test, df
 
     return train, valid, test
-
-
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # 1. 📊 Биннинги признаков
-    df['alone_bin'] = pd.cut(
-        df['Time_spent_Alone'],
-        bins=[-1, 2, 4, 11],
-        labels=['low', 'medium', 'high']
-    )  # Мало / средне / много времени в одиночестве
-
-    df['friends_bin'] = pd.cut(
-        df['Friends_circle_size'],
-        bins=[-1, 5, 10, 15],
-        labels=['few', 'medium', 'many']
-    )  # Размер круга общения
-
-    df['outside_bin'] = pd.cut(
-        df['Going_outside'],
-        bins=[-1, 3, 5, 7],
-        labels=['homebody', 'balanced', 'outgoing']
-    )  # Частота выхода из дома
-
-    df['posts_bin'] = pd.cut(
-        df['Post_frequency'],
-        bins=[-1, 3, 6, 10],
-        labels=['inactive', 'moderate', 'active']
-    )  # Частота постинга
-
-    df['events_bin'] = pd.cut(
-        df['Social_event_attendance'],
-        bins=[-1, 3, 6, 10],
-        labels=['rare', 'moderate', 'frequent']
-    )  # Частота участия в мероприятиях
-
-    # Проставим тип 'category'
-    cat_cols = [col for col in df.columns if col.endswith('_bin')]
-    for col in cat_cols:
-        df[col] = df[col].astype('category')
-
-    # 2. 🧠 Инженерные признаки
-
-    # Социальная изоляция
-    df['loneliness_index'] = df['Time_spent_Alone'] / (df['Friends_circle_size'] + 1)
-
-    # Общая активность вне дома
-    df['social_activity'] = df['Social_event_attendance'] + df['Going_outside']
-
-    # Индекс интроверсии (если усталость от общения — +3 балла)
-    df['introvert_score'] = df['Time_spent_Alone'] + df['Drained_after_socializing'] * 3
-
-    # Частота постов на одного друга
-    df['post_per_friend'] = df['Post_frequency'] / (df['Friends_circle_size'] + 1)
-
-    # Баланс оффлайн/онлайн активности
-    df['event_vs_post_ratio'] = df['Social_event_attendance'] / (df['Post_frequency'] + 1)
-
-    # Насколько человек активен и не устаёт от общества
-    df['active_life_index'] = df['Going_outside'] * (1 - df['Drained_after_socializing'])
-
-    # Индикатор социальной тревожности (оба признака = 1)
-    df['social_anxiety'] = (df['Stage_fear'] & df['Drained_after_socializing']).astype(int)
-
-    # 3. 🔍 Признак "есть ли пропуски вообще"
-    nan_cols = [col for col in df.columns if col.endswith('_nan')]
-    df['has_any_missing'] = df[nan_cols].sum(axis=1).gt(0).astype(int)
-
-    return df
 
 
 def add_group_stats_transform(df: pd.DataFrame, train_stats: dict = None) -> tuple[
@@ -680,7 +702,8 @@ def add_group_stats_transform(df: pd.DataFrame, train_stats: dict = None) -> tup
 
 
 def compute_group_stats(df_train: pd.DataFrame) -> dict:
-    """Вычисляет средние и std значения целевых признаков по каждой бин-группе
+    """
+    Вычисляет средние и std значения целевых признаков по каждой бин-группе.
     Возвращает словарь DataFrame'ов с агрегатами по группам:
     """
     stats = {}
@@ -713,12 +736,7 @@ def apply_group_stats(df: pd.DataFrame, stats: dict) -> pd.DataFrame:
 
 
 if __name__ == '__main__':
-    train, valid, test, df = make_train_valid(return_full_df=True)
+    train, valid, test, df = make_train_valid(return_full_df=True, add_original_df=True,
+                                              round_to_int=False)
 
-    dts = DataTransform(set_category=True, preprocessor=KNNImputer, n_neighbors=4)
-
-    # Применяем трансформации
-    train = dts.fit_transform(train, add_new_features=True)
-    valid = dts.transform(valid, add_new_features=True)
-
-    print(train.columns)
+    print(train.shape, valid.shape, test.shape)
